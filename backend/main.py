@@ -21,12 +21,11 @@ import tools
 load_dotenv()
 models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Agente Suporte TI API", version="1.2.1")
+app = FastAPI(title="Agente Suporte TI API", version="1.3.0")
 
-# --- CORS TOTALMENTE ABERTO PARA RESOLVER O BLOQUEIO ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # <-- Aceita qualquer origem
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -129,15 +128,21 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db)):
     for d in devices:
         inventory_context += f"- {d.asset_tag}: {d.manufacturer} {d.model} [{d.type}], IP: {d.ip_address}\n"
 
+    # Instruções melhoradas para a IA explicar a ação
     system_prompt = f"""
-Tu és o "Agente Suporte TI". Fala em português de Portugal (pt-PT).
+Tu és o "Agente Suporte TI". Fala em português de Portugal (pt-PT) de forma simpática e profissional.
 Tens ferramentas de leitura (CPU, RAM, Portas, Serviços, Ping).
-Se o utilizador relatar:
-- Problemas de internet/DNS: escreve `[AÇÃO_NECESSÁRIA:DNS]`
-- Impressora "engatada": escreve `[AÇÃO_NECESSÁRIA:SPOOLER]`
-- IP errado: escreve `[AÇÃO_NECESSÁRIA:RENOVAR_IP]`
-- Wi-Fi fraco: escreve `[AÇÃO_NECESSÁRIA:REDE]`
-- Ficheiros corrompidos: escreve `[AÇÃO_NECESSÁRIA:SFC]`
+
+Se o utilizador relatar um problema que exija uma ação corretiva, NÃO coloques apenas a tag. Deves:
+1. Explicar brevemente o que vais fazer (ex: "Para resolvermos o problema da impressora, precisamos de reiniciar o serviço de impressão que está bloqueado.").
+2. No final da tua resposta, adicionar a tag exata.
+
+Tags disponíveis:
+- Problemas de internet/DNS: `[AÇÃO_NECESSÁRIA:DNS]`
+- Impressora "engatada": `[AÇÃO_NECESSÁRIA:SPOOLER]`
+- IP errado: `[AÇÃO_NECESSÁRIA:RENOVAR_IP]`
+- Wi-Fi fraco: `[AÇÃO_NECESSÁRIA:REDE]`
+- Ficheiros corrompidos: `[AÇÃO_NECESSÁRIA:SFC]`
 
 {inventory_context}
 """
@@ -175,48 +180,40 @@ Se o utilizador relatar:
             function_name = tool_call.function.name
             function_args = tool_call.function.arguments
             
-            if function_name == "obter_info_sistema":
-                result = tools.obter_info_sistema()
+            if function_name == "obter_info_sistema": result = tools.obter_info_sistema()
             elif function_name == "testar_conectividade":
                 args = eval(function_args)
                 result = tools.testar_conectividade(args.get("host", "8.8.8.8"))
-            elif function_name == "listar_processos_pesados":
-                result = tools.listar_processos_pesados()
-            elif function_name == "verificar_servicos_windows":
-                result = tools.verificar_servicos_windows()
-            elif function_name == "verificar_portas_abertas":
-                result = tools.verificar_portas_abertas()
-            else:
-                result = "Ferramenta desconhecida."
+            elif function_name == "listar_processos_pesados": result = tools.listar_processos_pesados()
+            elif function_name == "verificar_servicos_windows": result = tools.verificar_servicos_windows()
+            elif function_name == "verificar_portas_abertas": result = tools.verificar_portas_abertas()
+            else: result = "Ferramenta desconhecida."
 
             messages.append(response_message)
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": result
-            })
+            messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
 
             final_response = client.chat.completions.create(
                 model="openrouter/free",
                 messages=messages,
-                extra_headers={
-                    "HTTP-Referer": "https://agente-suporte-ti.vercel.app",
-                    "X-OpenRouter-Title": "Agente Suporte TI",
-                }
+                extra_headers={"HTTP-Referer": "https://agente-suporte-ti.vercel.app", "X-OpenRouter-Title": "Agente Suporte TI"}
             )
             reply_text = final_response.choices[0].message.content
 
+        # --- FALLBACK DE SEGURANÇA COM EXPLICAÇÃO ---
+        # Se a IA se esquecer da tag, adicionamos a tag E uma explicação por defeito.
         msg_lower = payload.message.lower()
-        if ("dns" in msg_lower or "internet" in msg_lower) and "[AÇÃO_NECESSÁRIA:" not in reply_text:
-            reply_text += "\n\n**[AÇÃO_NECESSÁRIA:DNS]**"
-        elif ("impressora" in msg_lower or "imprimir" in msg_lower) and "[AÇÃO_NECESSÁRIA:" not in reply_text:
-            reply_text += "\n\n**[AÇÃO_NECESSÁRIA:SPOOLER]**"
-        elif ("ip" in msg_lower or "dhcp" in msg_lower) and "[AÇÃO_NECESSÁRIA:" not in reply_text:
-            reply_text += "\n\n**[AÇÃO_NECESSÁRIA:RENOVAR_IP]**"
-        elif ("wifi" in msg_lower or "wi-fi" in msg_lower or "rede" in msg_lower) and "[AÇÃO_NECESSÁRIA:" not in reply_text:
-            reply_text += "\n\n**[AÇÃO_NECESSÁRIA:REDE]**"
-        elif ("corrompido" in msg_lower or "erro" in msg_lower) and "[AÇÃO_NECESSÁRIA:" not in reply_text:
-            reply_text += "\n\n**[AÇÃO_NECESSÁRIA:SFC]**"
+        
+        if "[AÇÃO_NECESSÁRIA:" not in reply_text:
+            if "dns" in msg_lower or "internet" in msg_lower:
+                reply_text += "\n\nPara resolvermos este problema de internet, precisamos de limpar a cache de DNS do seu computador.\n\n**[AÇÃO_NECESSÁRIA:DNS]**"
+            elif "impressora" in msg_lower or "imprimir" in msg_lower:
+                reply_text += "\n\nPara resolvermos o problema da impressora, precisamos de reiniciar o serviço de impressão que pode estar bloqueado.\n\n**[AÇÃO_NECESSÁRIA:SPOOLER]**"
+            elif "ip" in msg_lower or "dhcp" in msg_lower:
+                reply_text += "\n\nPara corrigir o endereço de rede, precisamos de renovar o seu IP.\n\n**[AÇÃO_NECESSÁRIA:RENOVAR_IP]**"
+            elif "wifi" in msg_lower or "wi-fi" in msg_lower or "rede" in msg_lower:
+                reply_text += "\n\nPara restabelecer a ligação, precisamos de reiniciar a placa de rede do seu computador.\n\n**[AÇÃO_NECESSÁRIA:REDE]**"
+            elif "corrompido" in msg_lower or "erro" in msg_lower:
+                reply_text += "\n\nPara verificarmos se existem ficheiros do sistema corrompidos, precisamos de executar a ferramenta SFC do Windows.\n\n**[AÇÃO_NECESSÁRIA:SFC]**"
 
         return {"id": str(uuid.uuid4()), "role": "assistant", "content": reply_text, "createdAt": datetime.now().isoformat() + "Z"}
 
@@ -224,12 +221,14 @@ Se o utilizador relatar:
         print(f"Erro no OpenRouter: {e}")
         mock_reply = "⚠️ *O serviço de IA está indisponível. A usar simulação local.*\n\n"
         msg_lower = payload.message.lower()
-        if "dns" in msg_lower or "internet" in msg_lower: mock_reply += "Posso limpar a cache DNS.\n\n**[AÇÃO_NECESSÁRIA:DNS]**"
-        elif "impressora" in msg_lower or "imprimir" in msg_lower: mock_reply += "Posso reiniciar o spooler.\n\n**[AÇÃO_NECESSÁRIA:SPOOLER]**"
-        elif "ip" in msg_lower: mock_reply += "Posso renovar o IP.\n\n**[AÇÃO_NECESSÁRIA:RENOVAR_IP]**"
-        elif "wifi" in msg_lower or "rede" in msg_lower: mock_reply += "Posso reiniciar a placa de rede.\n\n**[AÇÃO_NECESSÁRIA:REDE]**"
-        elif "corrompido" in msg_lower or "erro" in msg_lower: mock_reply += "Posso correr o SFC.\n\n**[AÇÃO_NECESSÁRIA:SFC]**"
+        
+        if "dns" in msg_lower or "internet" in msg_lower: mock_reply += "Para resolver o problema de internet, precisamos de limpar a cache DNS.\n\n**[AÇÃO_NECESSÁRIA:DNS]**"
+        elif "impressora" in msg_lower or "imprimir" in msg_lower: mock_reply += "Para resolver o problema da impressora, precisamos de reiniciar o serviço de impressão.\n\n**[AÇÃO_NECESSÁRIA:SPOOLER]**"
+        elif "ip" in msg_lower: mock_reply += "Para corrigir o IP, precisamos de renovar o endereço.\n\n**[AÇÃO_NECESSÁRIA:RENOVAR_IP]**"
+        elif "wifi" in msg_lower or "rede" in msg_lower: mock_reply += "Para restabelecer a ligação, precisamos de reiniciar a placa de rede.\n\n**[AÇÃO_NECESSÁRIA:REDE]**"
+        elif "corrompido" in msg_lower or "erro" in msg_lower: mock_reply += "Para verificar o sistema, precisamos de executar o SFC.\n\n**[AÇÃO_NECESSÁRIA:SFC]**"
         else: mock_reply += "Não consigo processar isso agora."
+        
         return {"id": str(uuid.uuid4()), "role": "assistant", "content": mock_reply, "createdAt": datetime.now().isoformat() + "Z"}
 
 @app.post("/api/actions/flush-dns")

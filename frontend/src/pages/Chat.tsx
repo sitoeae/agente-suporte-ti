@@ -66,11 +66,11 @@ export default function Chat() {
   }
 
   const actionMap: Record<string, { label: string, endpoint: string }> = {
-    "DNS": { label: "Autorizar Limpeza de DNS", endpoint: "/api/actions/flush-dns" },
+    "DNS": { label: "Limpar Cache DNS", endpoint: "/api/actions/flush-dns" },
     "SPOOLER": { label: "Reiniciar Serviço de Impressão", endpoint: "/api/actions/restart-spooler" },
     "RENOVAR_IP": { label: "Renovar Endereço IP", endpoint: "/api/actions/renew-ip" },
     "REDE": { label: "Reiniciar Placa de Rede", endpoint: "/api/actions/restart-network" },
-    "SFC": { label: "Executar Verificação de Sistema (SFC)", endpoint: "/api/actions/sfc-scan" },
+    "SFC": { label: "Verificar Ficheiros do Sistema", endpoint: "/api/actions/sfc-scan" },
   };
 
   return (
@@ -94,12 +94,20 @@ export default function Chat() {
             return (
               <div key={m.id} className={`chat-message ${m.role}`}>
                 <div>{displayContent}</div>
+                
                 {actionsFound.length > 0 && (
-                  <div style={{ marginTop: "1rem", padding: "1rem", background: "rgba(56, 189, 248, 0.1)", borderRadius: "8px", border: "1px solid var(--accent)" }}>
-                    <p style={{ margin: "0 0 0.5rem", fontSize: "14px" }}>O Agente precisa de permissão para executar:</p>
+                  <div style={{ marginTop: "1.5rem", padding: "1rem", background: "rgba(56, 189, 248, 0.1)", borderRadius: "8px", border: "1px solid var(--accent)" }}>
+                    <p style={{ margin: "0 0 0.75rem", fontSize: "14px", fontWeight: "bold" }}>
+                      Ação recomendada pelo agente:
+                    </p>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
                       {actionsFound.map(actionKey => (
-                        <Button key={actionKey} variant="primary" onClick={() => handleAction(actionMap[actionKey].endpoint, actionKey)} disabled={loading}>
+                        <Button 
+                          key={actionKey} 
+                          variant="primary" 
+                          onClick={() => handleAction(actionMap[actionKey].endpoint, actionKey)} 
+                          disabled={loading}
+                        >
                           {actionMap[actionKey].label}
                         </Button>
                       ))}
