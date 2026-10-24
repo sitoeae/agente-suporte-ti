@@ -1,5 +1,4 @@
 import { useState } from "react";
-import ChatWindow from "@/components/chat/ChatWindow";
 import ChatInput from "@/components/chat/ChatInput";
 import Button from "@/components/ui/Button";
 import { api } from "@/services/api";
@@ -34,7 +33,6 @@ export default function Chat() {
   }
 
   async function handleCreateTicket() {
-    // ... (mantém-se igual ao anterior)
     const firstUserMsg = messages.find((m) => m.role === "user");
     const lastAiMsg = [...messages].reverse().find((m) => m.role === "assistant");
     if (!firstUserMsg || !lastAiMsg) return;
@@ -67,7 +65,6 @@ export default function Chat() {
     }
   }
 
-  // Mapeamento de ações para botões
   const actionMap: Record<string, { label: string, endpoint: string }> = {
     "DNS": { label: "Autorizar Limpeza de DNS", endpoint: "/api/actions/flush-dns" },
     "SPOOLER": { label: "Reiniciar Serviço de Impressão", endpoint: "/api/actions/restart-spooler" },
@@ -88,10 +85,7 @@ export default function Chat() {
       <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "0.75rem", minHeight: 0 }}>
         <div className="chat-messages">
           {messages.map((m) => {
-            // Encontra todas as ações pedidas nesta mensagem
             const actionsFound = Object.keys(actionMap).filter(key => m.content.includes(`[AÇÃO_NECESSÁRIA:${key}]`));
-            
-            // Limpa as tags da mensagem para ficar bonita
             let displayContent = m.content;
             actionsFound.forEach(key => {
               displayContent = displayContent.replace(`[AÇÃO_NECESSÁRIA:${key}]`, "").trim();
@@ -100,18 +94,12 @@ export default function Chat() {
             return (
               <div key={m.id} className={`chat-message ${m.role}`}>
                 <div>{displayContent}</div>
-                
                 {actionsFound.length > 0 && (
                   <div style={{ marginTop: "1rem", padding: "1rem", background: "rgba(56, 189, 248, 0.1)", borderRadius: "8px", border: "1px solid var(--accent)" }}>
                     <p style={{ margin: "0 0 0.5rem", fontSize: "14px" }}>O Agente precisa de permissão para executar:</p>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
                       {actionsFound.map(actionKey => (
-                        <Button 
-                          key={actionKey}
-                          variant="primary" 
-                          onClick={() => handleAction(actionMap[actionKey].endpoint, actionKey)}
-                          disabled={loading}
-                        >
+                        <Button key={actionKey} variant="primary" onClick={() => handleAction(actionMap[actionKey].endpoint, actionKey)} disabled={loading}>
                           {actionMap[actionKey].label}
                         </Button>
                       ))}

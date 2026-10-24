@@ -11,16 +11,11 @@ export default function Dashboard() {
   const [deviceCount, setDeviceCount] = useState<number>(0);
 
   useEffect(() => {
-    // Vai buscar os tickets e os equipamentos em paralelo
-    Promise.all([
-      api.listTickets(),
-      api.listDevices()
-    ]).then(([ticketsData, devicesData]) => {
-      setTickets(ticketsData);
-      setDeviceCount(devicesData.length);
-    }).catch(err => {
-      console.error("Erro ao carregar dados do dashboard:", err);
-    });
+    Promise.all([api.listTickets(), api.listDevices()])
+      .then(([ticketsData, devicesData]) => {
+        setTickets(ticketsData);
+        setDeviceCount(devicesData.length);
+      }).catch(err => console.error(err));
   }, []);
 
   const abertos = tickets.filter((t) => t.status === "aberto").length;
@@ -28,33 +23,25 @@ export default function Dashboard() {
   const criticos = tickets.filter((t) => t.priority === "critica").length;
   
   const recentes = [...tickets]
-    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .sort((a, b) => {
+      const dateA = a.created_at || a.createdAt || "";
+      const dateB = b.created_at || b.createdAt || "";
+      return dateB.localeCompare(dateA);
+    })
     .slice(0, 3);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
       <div>
         <h1>Dashboard</h1>
-        <p style={{ color: "var(--text-muted)", margin: 0 }}>
-          Visão geral do suporte técnico.
-        </p>
+        <p style={{ color: "var(--text-muted)", margin: 0 }}>Visão geral do suporte técnico.</p>
       </div>
 
       <div className="grid-cards">
-        <Card title="Tickets abertos">
-          <div style={{ fontSize: 28, fontWeight: 700 }}>{abertos}</div>
-        </Card>
-        <Card title="Em progresso">
-          <div style={{ fontSize: 28, fontWeight: 700 }}>{emProgresso}</div>
-        </Card>
-        <Card title="Prioridade crítica">
-          <div style={{ fontSize: 28, fontWeight: 700, color: "var(--danger)" }}>
-            {criticos}
-          </div>
-        </Card>
-        <Card title="Equipamentos">
-          <div style={{ fontSize: 28, fontWeight: 700 }}>{deviceCount}</div>
-        </Card>
+        <Card title="Tickets abertos"><div style={{ fontSize: 28, fontWeight: 700 }}>{abertos}</div></Card>
+        <Card title="Em progresso"><div style={{ fontSize: 28, fontWeight: 700 }}>{emProgresso}</div></Card>
+        <Card title="Prioridade crítica"><div style={{ fontSize: 28, fontWeight: 700, color: "var(--danger)" }}>{criticos}</div></Card>
+        <Card title="Equipamentos"><div style={{ fontSize: 28, fontWeight: 700 }}>{deviceCount}</div></Card>
       </div>
 
       <Card title="Incidentes recentes">
@@ -63,29 +50,18 @@ export default function Dashboard() {
         ) : (
           <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
             {recentes.map((t) => (
-              <li
-                key={t.id}
-                style={{
-                  padding: "0.6rem 0",
-                  borderBottom: "1px solid var(--border)",
-                  display: "flex",
-                  gap: "0.75rem",
-                  alignItems: "center",
-                }}
-              >
+              <li key={t.id} style={{ padding: "0.6rem 0", borderBottom: "1px solid var(--border)", display: "flex", gap: "0.75rem", alignItems: "center" }}>
                 <Badge variant={t.priority}>{t.priority}</Badge>
                 <span style={{ flex: 1 }}>{t.title}</span>
                 <span style={{ color: "var(--text-muted)", fontSize: 12 }}>
-                  {formatDate(t.created_at || t.createdAt)}
+                  {formatDate(t.created_at || t.createdAt || new Date().toISOString())}
                 </span>
               </li>
             ))}
           </ul>
         )}
         <div style={{ marginTop: "0.75rem" }}>
-          <Link to="/tickets" className="btn" style={{ display: "inline-block" }}>
-            Ver todos os tickets
-          </Link>
+          <Link to="/tickets" className="btn" style={{ display: "inline-block" }}>Ver todos os tickets</Link>
         </div>
       </Card>
     </div>
