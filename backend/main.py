@@ -14,13 +14,12 @@ import jwt
 from jwt import PyJWKClient
 
 import tools
-# Importar as novas skills
 from skills import printing, network
 
 load_dotenv()
 models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Agente Suporte TI API", version="2.0.0 - Skills")
+app = FastAPI(title="Agente Suporte TI API", version="2.5.0 - Local Agent")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -29,12 +28,12 @@ client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_key)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
-
 _jwks_client = PyJWKClient(f"{SUPABASE_URL.rstrip('/')}/auth/v1/.well-known/jwks.json") if SUPABASE_URL else None
 
 class ChatPayload(BaseModel):
     message: str
     history: List[Dict[str, str]] = []
+    local_agent_online: bool = False # Nova flag
 
 class TicketCreate(BaseModel):
     title: str
@@ -75,7 +74,6 @@ async def get_current_user(authorization: str = Header(None)):
     except Exception as e:
         raise HTTPException(status_code=401, detail="Token inválido")
 
-# ... (Rotas de Tickets e Devices mantêm-se iguais, omitidas aqui por brevidade, usa as anteriores) ...
 @app.get("/api/tickets")
 def get_tickets(db: Session = Depends(get_db), user_id: str = Depends(get_current_user)):
     user_profile = db.query(models.Profile).filter(models.Profile.id == user_id).first()
@@ -98,29 +96,21 @@ def create_device(device_in: DeviceCreate, db: Session = Depends(get_db), user_i
     novo = models.Device(**device_in.model_dump())
     db.add(novo); db.commit(); db.refresh(novo); return novo
 
-# --- CHAT (O ORQUESTRADOR) ---
 @app.post("/api/chat")
 async def chat(payload: ChatPayload, db: Session = Depends(get_db)):
     devices = db.query(models.Device).all()
     inventory_context = "INVENTÁRIO:\n" + "\n".join([f"- {d.asset_tag}: {d.manufacturer} {d.model}" for d in devices])
 
+    status_agente = "ONLINE (O Frontend vai executar o diagnóstico e a correção no PC do utilizador)" if payload.local_agent_online else "OFFLINE (O utilizador ainda não ligou o agente local)"
+
     system_prompt = f"""
 Tu és o "Agente Suporte TI". Fala em português de Portugal (pt-PT).
-O teu fluxo de trabalho é: Coletar -> Diagnosticar -> Sugerir Correção -> Validar.
-
-Tens acesso a duas "Skills" de diagnóstico que executam verificações profundas no sistema:
-1. `skill_diagnosticar_impressao`: Verifica spooler, fila, impressoras offline. Retorna um JSON.
-2. `skill_diagnosticar_rede`: Verifica DNS, IP, DHCP. Retorna um JSON.
+CONTEXTO: Assumes que o utilizador está num Windows 10, 11 ou Server.
+ESTADO DO AGENTE LOCAL NO PC DO UTILIZADOR: {status_agente}
 
 REGRAS:
-- Se o utilizador disser que algo não imprime, USA OBRIGATORIAMENTE a `skill_diagnosticar_impressao`.
-- Se o utilizador disser que a internet está falha, USA OBRIGATORIAMENTE a `skill_diagnosticar_rede`.
-- Lê o JSON retornado pela skill. Se o `status` for "PROBLEMA_ENCONTRADO", explica ao utilizador e adiciona a tag da ação correspondente:
-  - Para Spooler: `[AÇÃO_NECESSÁRIA:SPOOLER]`
-  - Para DNS: `[AÇÃO_NECESSÁRIA:DNS]`
-  - Para IP: `[AÇÃO_NECESSÁRIA:RENOVAR_IP]`
-  - Para Rede Física: `[AÇÃO_NECESSÁRIA:REDE]`
-- Se não houver ação, explica o que encontraste e diz que o problema pode ser físico ou externo.
+- Se o problema for de impressão ou rede e o agente estiver ONLINE: usa a ferramenta de diagnóstico adequada (skill_diagnosticar_impressao / skill_diagnosticar_rede) para que o Frontend saiba qual botão de correção mostrar.
+- Se o problema for de impressão/rede e o agente estiver OFFLINE: avisa o utilizador que precisa de correr o script `agente_local.py` para permitir o diagnóstico real.
 
 {inventory_context}
 """
@@ -130,10 +120,9 @@ REGRAS:
     messages.append({"role": "user", "content": payload.message})
 
     openai_tools = [
-        {"type": "function", "function": {"name": "skill_diagnosticar_impressao", "description": "Executa um diagnóstico completo de impressão (spooler, fila, impressoras)."}},
-        {"type": "function", "function": {"name": "skill_diagnosticar_rede", "description": "Executa um diagnóstico completo de rede (DNS, IP)."}},
-        {"type": "function", "function": {"name": "obter_info_sistema", "description": "Verifica CPU e RAM."}},
-        {"type": "function", "function": {"name": "testar_conectividade", "description": "Faz ping a um host.", "parameters": {"type": "object", "properties": {"host": {"type": "string"}}}}}
+        {"type": "function", "function": {"name": "skill_diagnosticar_impressao", "description": "Diagnóstico de impressão."}},
+        {"type": "function", "function": {"name": "skill_diagnosticar_rede", "description": "Diagnóstico de rede."}},
+        {"type": "function", "function": {"name": "obter_info_sistema", "description": "Verifica CPU e RAM."}}
     ]
 
     try:
@@ -148,15 +137,11 @@ REGRAS:
         while response_message.tool_calls:
             for tool_call in response_message.tool_calls:
                 fn_name = tool_call.function.name
-                fn_args = tool_call.function.arguments
-                
-                result = ""
-                if fn_name == "skill_diagnosticar_impressao": result = printing.diagnosticar_impressao()
-                elif fn_name == "skill_diagnosticar_rede": result = network.diagnosticar_rede()
+                # O backend já não corre a skill de verdade, apenas simula a resposta para o frontend saber o que fazer
+                if fn_name == "skill_diagnosticar_impressao": result = "Diagnóstico solicitado. O Frontend irá tratar."
+                elif fn_name == "skill_diagnosticar_rede": result = "Diagnóstico solicitado. O Frontend irá tratar."
                 elif fn_name == "obter_info_sistema": result = tools.obter_info_sistema()
-                elif fn_name == "testar_conectividade":
-                    args = json.loads(fn_args)
-                    result = tools.testar_conectividade(args.get("host", "8.8.8.8"))
+                else: result = "Desconhecido."
                 
                 messages.append(response_message)
                 messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
@@ -168,26 +153,12 @@ REGRAS:
             response_message = response.choices[0].message
             reply_text = response_message.content or ""
 
-        # Fallback
         msg_lower = payload.message.lower()
         if "[AÇÃO_NECESSÁRIA:" not in reply_text:
             if "impressora" in msg_lower or "imprimir" in msg_lower: reply_text += "\n\n**[AÇÃO_NECESSÁRIA:SPOOLER]**"
-            elif "dns" in msg_lower: reply_text += "\n\n**[AÇÃO_NECESSÁRIA:DNS]**"
+            elif "dns" in msg_lower or "internet" in msg_lower: reply_text += "\n\n**[AÇÃO_NECESSÁRIA:DNS]**"
 
         return {"id": str(uuid.uuid4()), "role": "assistant", "content": reply_text, "createdAt": datetime.now().isoformat() + "Z"}
     except Exception as e:
         print(f"Erro IA: {e}")
-        return {"id": str(uuid.uuid4()), "role": "system", "content": "Erro no cérebro da IA.", "createdAt": datetime.now().isoformat() + "Z"}
-
-# --- ROTAS DE AÇÃO (Executam as Remediações das Skills) ---
-@app.post("/api/actions/flush-dns")
-def action_dns(user_id: str = Depends(get_current_user)): return {"status": "success", "message": network.corrigir_dns()}
-
-@app.post("/api/actions/renew-ip")
-def action_ip(user_id: str = Depends(get_current_user)): return {"status": "success", "message": network.corrigir_ip()}
-
-@app.post("/api/actions/restart-network")
-def action_net(user_id: str = Depends(get_current_user)): return {"status": "success", "message": network.reiniciar_rede()}
-
-@app.post("/api/actions/restart-spooler")
-def action_spooler(user_id: str = Depends(get_current_user)): return {"status": "success", "message": printing.corrigir_spooler()}
+        return {"id": str(uuid.uuid4()), "role": "system", "content": "Serviço de IA offline.", "createdAt": datetime.now().isoformat() + "Z"}
