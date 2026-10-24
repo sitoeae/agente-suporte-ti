@@ -21,15 +21,12 @@ import tools
 load_dotenv()
 models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Agente Suporte TI API", version="1.2.0")
+app = FastAPI(title="Agente Suporte TI API", version="1.2.1")
 
-# --- CONFIGURAÇÃO CORS ATUALIZADA ---
+# --- CORS TOTALMENTE ABERTO PARA RESOLVER O BLOQUEIO ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173", 
-        "https://agente-suporte-ti.vercel.app" # <-- O teu link do Vercel aqui
-    ],
+    allow_origins=["*"], # <-- Aceita qualquer origem
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -95,7 +92,6 @@ async def get_current_user(authorization: str = Header(None)):
 @app.get("/")
 def read_root(): return {"message": "API a funcionar com OpenRouter!"}
 
-# --- ROTAS CRUD ---
 @app.get("/api/tickets")
 def get_tickets(db: Session = Depends(get_db), user_id: str = Depends(get_current_user)):
     try:
@@ -126,7 +122,6 @@ def create_device(device_in: DeviceCreate, db: Session = Depends(get_db), user_i
         db.add(novo); db.commit(); db.refresh(novo); return novo
     except Exception as e: db.rollback(); raise HTTPException(status_code=500, detail=str(e))
 
-# --- ROTA DE CHAT ---
 @app.post("/api/chat")
 async def chat(payload: ChatPayload, db: Session = Depends(get_db)):
     devices = db.query(models.Device).all()
@@ -237,7 +232,6 @@ Se o utilizador relatar:
         else: mock_reply += "Não consigo processar isso agora."
         return {"id": str(uuid.uuid4()), "role": "assistant", "content": mock_reply, "createdAt": datetime.now().isoformat() + "Z"}
 
-# --- ROTAS DE AÇÃO ---
 @app.post("/api/actions/flush-dns")
 def action_flush_dns(user_id: str = Depends(get_current_user)): return {"status": "success", "message": tools.limpar_cache_dns()}
 
