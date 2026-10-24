@@ -1,119 +1,32 @@
-from fastapi import FastAPI, Depends, HTTPException, Header
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
-from datetime import datetime, date
-import uuid, os, asyncio, json
-from sqlalchemy.orm import Session
-from dotenv import load_dotenv
-
-from openai import OpenAI
-from database import engine, get_db
-import models
-import jwt
-from jwt import PyJWKClient
-
-import tools
-from skills import printing, network
-
-load_dotenv()
-models.Base.metadata.create_all(bind=engine)
-
-app = FastAPI(title="Agente Suporte TI API", version="2.5.0 - Local Agent")
-
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
-
-openrouter_key = os.getenv("OPENROUTER_API_KEY")
-client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_key)
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
-_jwks_client = PyJWKClient(f"{SUPABASE_URL.rstrip('/')}/auth/v1/.well-known/jwks.json") if SUPABASE_URL else None
-
+# Adiciona isto no ChatPayload
 class ChatPayload(BaseModel):
     message: str
     history: List[Dict[str, str]] = []
-    local_agent_online: bool = False # Nova flag
+    local_agent_online: bool = False # <-- NOVO
 
-class TicketCreate(BaseModel):
-    title: str
-    description: str
-    category: str = "outro"
-    priority: str = "media"
-
-class DeviceCreate(BaseModel):
-    asset_tag: str
-    type: str
-    manufacturer: Optional[str] = None
-    model: Optional[str] = None
-    serial_number: Optional[str] = None
-    specs: Optional[str] = None
-    assigned_to: Optional[str] = None
-    location: Optional[str] = None
-    status: str = "Em uso"
-    network_name: Optional[str] = None
-    ip_address: Optional[str] = None
-    mac_address: Optional[str] = None
-    ip_type: Optional[str] = "Dinâmico"
-    server_role: Optional[str] = None
-    os: Optional[str] = None
-
-async def get_current_user(authorization: str = Header(None)):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Token em falta")
-    token = authorization.split(" ")[1]
-    try:
-        header = jwt.get_unverified_header(token)
-        alg = header.get("alg", "HS256")
-        if alg == "HS256":
-            payload = jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"], audience="authenticated", options={"verify_aud": True})
-        else:
-            signing_key = _jwks_client.get_signing_key_from_jwt(token)
-            payload = jwt.decode(token, signing_key.key, algorithms=["ES256"], audience="authenticated", options={"verify_aud": True})
-        return payload.get("sub")
-    except Exception as e:
-        raise HTTPException(status_code=401, detail="Token inválido")
-
-@app.get("/api/tickets")
-def get_tickets(db: Session = Depends(get_db), user_id: str = Depends(get_current_user)):
-    user_profile = db.query(models.Profile).filter(models.Profile.id == user_id).first()
-    if user_profile.role in ["technician", "admin"]: return db.query(models.Ticket).order_by(models.Ticket.created_at.desc()).all()
-    return db.query(models.Ticket).filter(models.Ticket.user_id == user_id).order_by(models.Ticket.created_at.desc()).all()
-
-@app.post("/api/tickets")
-def create_ticket(ticket_in: TicketCreate, db: Session = Depends(get_db), user_id: str = Depends(get_current_user)):
-    novo = models.Ticket(user_id=user_id, title=ticket_in.title, description=ticket_in.description, category=ticket_in.category, priority=ticket_in.priority, status="aberto")
-    db.add(novo); db.commit(); db.refresh(novo); return novo
-
-@app.get("/api/devices")
-def get_devices(db: Session = Depends(get_db), user_id: str = Depends(get_current_user)):
-    return db.query(models.Device).order_by(models.Device.created_at.desc()).all()
-
-@app.post("/api/devices")
-def create_device(device_in: DeviceCreate, db: Session = Depends(get_db), user_id: str = Depends(get_current_user)):
-    user_profile = db.query(models.Profile).filter(models.Profile.id == user_id).first()
-    if user_profile.role not in ["technician", "admin"]: raise HTTPException(status_code=403, detail="Não autorizado")
-    novo = models.Device(**device_in.model_dump())
-    db.add(novo); db.commit(); db.refresh(novo); return novo
-
+# Dentro da função @app.post("/api/chat"):
 @app.post("/api/chat")
 async def chat(payload: ChatPayload, db: Session = Depends(get_db)):
-    devices = db.query(models.Device).all()
-    inventory_context = "INVENTÁRIO:\n" + "\n".join([f"- {d.asset_tag}: {d.manufacturer} {d.model}" for d in devices])
+    # ... (obter o inventário igual) ...
 
-    status_agente = "ONLINE (O Frontend vai executar o diagnóstico e a correção no PC do utilizador)" if payload.local_agent_online else "OFFLINE (O utilizador ainda não ligou o agente local)"
-
+    agent_status = "ONLINE" if payload.local_agent_online else "OFFLINE"
+    
     system_prompt = f"""
 Tu és o "Agente Suporte TI". Fala em português de Portugal (pt-PT).
 CONTEXTO: Assumes que o utilizador está num Windows 10, 11 ou Server.
-ESTADO DO AGENTE LOCAL NO PC DO UTILIZADOR: {status_agente}
+ESTADO DO AGENTE LOCAL NO PC DO UTILIZADOR: {agent_status}
 
 REGRAS:
-- Se o problema for de impressão ou rede e o agente estiver ONLINE: usa a ferramenta de diagnóstico adequada (skill_diagnosticar_impressao / skill_diagnosticar_rede) para que o Frontend saiba qual botão de correção mostrar.
-- Se o problema for de impressão/rede e o agente estiver OFFLINE: avisa o utilizador que precisa de correr o script `agente_local.py` para permitir o diagnóstico real.
+- Se o utilizador se queixar de algo (ex: "não imprime", "internet falha") e o Agente Local estiver **ONLINE**:
+  -> Usa a ferramenta `skill_diagnosticar_impressao` ou `skill_diagnosticar_rede` para mandar o PC fazer o teste. (O Frontend encarrega-se de apanhar o botão de ação).
+- Se o utilizador se queixar e o Agente Local estiver **OFFLINE**:
+  -> Diz ao utilizador: "Para eu conseguir verificar o teu PC e corrigir o problema automaticamente, precisas de descarregar e correr o Agente Local." E dá-lhe as instruções simples.
+- NUNCA faças tu o diagnóstico falso. Deixa as ferramentas fazerem o trabalho.
 
 {inventory_context}
 """
+
+    # ... (o resto do código da chamada à IA fica igual) ...
 
     messages = [{"role": "system", "content": system_prompt}]
     for msg in payload.history: messages.append({"role": msg["role"], "content": msg["content"]})

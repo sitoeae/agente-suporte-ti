@@ -3,9 +3,34 @@ import type { Ticket } from "@/types/ticket";
 import type { ChatMessage } from "@/types/chat";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+const LOCAL_AGENT_URL = "http://localhost:5050";
 
 export const api = {
   getBaseUrl: () => API_URL,
+
+  // Verifica se o agente Windows está a correr no PC do utilizador
+  async checkLocalAgent(): Promise<boolean> {
+    try {
+      const res = await fetch(`${LOCAL_AGENT_URL}/status`, { method: 'GET', mode: 'cors' });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  },
+
+  // Executa uma ação no agente local
+  async callLocalAgent(action: string): Promise<any> {
+    try {
+      const res = await fetch(`${LOCAL_AGENT_URL}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action })
+      });
+      return await res.json();
+    } catch (error) {
+      throw new Error("Falha ao comunicar com o Agente Local.");
+    }
+  },
 
   async listTickets(): Promise<Ticket[]> {
     const { data: { session } } = await supabase.auth.getSession();
@@ -51,10 +76,17 @@ export const api = {
   },
 
   async sendChatMessage(history: ChatMessage[], text: string): Promise<ChatMessage> {
+    // Verificamos se o agente local está online para avisar a IA
+    const agentOnline = await this.checkLocalAgent();
+    
     const res = await fetch(`${API_URL}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, history: history.map(h => ({ role: h.role, content: h.content })) }),
+      body: JSON.stringify({ 
+        message: text, 
+        history: history.map(h => ({ role: h.role, content: h.content })),
+        local_agent_online: agentOnline // Enviamos esta flag para o backend
+      }),
     });
     
     if (!res.ok) {
