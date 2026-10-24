@@ -3,47 +3,34 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from datetime import datetime, date
-import uuid
-import os
-import asyncio
+import uuid, os, asyncio, json
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 
 from openai import OpenAI
-
 from database import engine, get_db
 import models
 import jwt
 from jwt import PyJWKClient
 
 import tools
+# Importar as novas skills
+from skills import printing, network
 
 load_dotenv()
 models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Agente Suporte TI API", version="1.3.0")
+app = FastAPI(title="Agente Suporte TI API", version="2.0.0 - Skills")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], 
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 openrouter_key = os.getenv("OPENROUTER_API_KEY")
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=openrouter_key,
-)
+client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_key)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 
-_jwks_client = None
-if SUPABASE_URL:
-    jwks_url = f"{SUPABASE_URL.rstrip('/')}/auth/v1/.well-known/jwks.json"
-    _jwks_client = PyJWKClient(jwks_url, cache_keys=True)
+_jwks_client = PyJWKClient(f"{SUPABASE_URL.rstrip('/')}/auth/v1/.well-known/jwks.json") if SUPABASE_URL else None
 
 class ChatPayload(BaseModel):
     message: str
@@ -88,24 +75,17 @@ async def get_current_user(authorization: str = Header(None)):
     except Exception as e:
         raise HTTPException(status_code=401, detail="Token inválido")
 
-@app.get("/")
-def read_root(): return {"message": "API a funcionar com OpenRouter!"}
-
+# ... (Rotas de Tickets e Devices mantêm-se iguais, omitidas aqui por brevidade, usa as anteriores) ...
 @app.get("/api/tickets")
 def get_tickets(db: Session = Depends(get_db), user_id: str = Depends(get_current_user)):
-    try:
-        user_profile = db.query(models.Profile).filter(models.Profile.id == user_id).first()
-        if user_profile.role in ["technician", "admin"]:
-            return db.query(models.Ticket).order_by(models.Ticket.created_at.desc()).all()
-        return db.query(models.Ticket).filter(models.Ticket.user_id == user_id).order_by(models.Ticket.created_at.desc()).all()
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+    user_profile = db.query(models.Profile).filter(models.Profile.id == user_id).first()
+    if user_profile.role in ["technician", "admin"]: return db.query(models.Ticket).order_by(models.Ticket.created_at.desc()).all()
+    return db.query(models.Ticket).filter(models.Ticket.user_id == user_id).order_by(models.Ticket.created_at.desc()).all()
 
 @app.post("/api/tickets")
 def create_ticket(ticket_in: TicketCreate, db: Session = Depends(get_db), user_id: str = Depends(get_current_user)):
-    try:
-        novo = models.Ticket(user_id=user_id, title=ticket_in.title, description=ticket_in.description, category=ticket_in.category, priority=ticket_in.priority, status="aberto")
-        db.add(novo); db.commit(); db.refresh(novo); return novo
-    except Exception as e: db.rollback(); raise HTTPException(status_code=500, detail=str(e))
+    novo = models.Ticket(user_id=user_id, title=ticket_in.title, description=ticket_in.description, category=ticket_in.category, priority=ticket_in.priority, status="aberto")
+    db.add(novo); db.commit(); db.refresh(novo); return novo
 
 @app.get("/api/devices")
 def get_devices(db: Session = Depends(get_db), user_id: str = Depends(get_current_user)):
@@ -113,135 +93,101 @@ def get_devices(db: Session = Depends(get_db), user_id: str = Depends(get_curren
 
 @app.post("/api/devices")
 def create_device(device_in: DeviceCreate, db: Session = Depends(get_db), user_id: str = Depends(get_current_user)):
-    try:
-        user_profile = db.query(models.Profile).filter(models.Profile.id == user_id).first()
-        if user_profile.role not in ["technician", "admin"]:
-            raise HTTPException(status_code=403, detail="Apenas técnicos podem adicionar equipamentos")
-        novo = models.Device(**device_in.model_dump())
-        db.add(novo); db.commit(); db.refresh(novo); return novo
-    except Exception as e: db.rollback(); raise HTTPException(status_code=500, detail=str(e))
+    user_profile = db.query(models.Profile).filter(models.Profile.id == user_id).first()
+    if user_profile.role not in ["technician", "admin"]: raise HTTPException(status_code=403, detail="Não autorizado")
+    novo = models.Device(**device_in.model_dump())
+    db.add(novo); db.commit(); db.refresh(novo); return novo
 
+# --- CHAT (O ORQUESTRADOR) ---
 @app.post("/api/chat")
 async def chat(payload: ChatPayload, db: Session = Depends(get_db)):
     devices = db.query(models.Device).all()
-    inventory_context = "INVENTÁRIO:\n"
-    for d in devices:
-        inventory_context += f"- {d.asset_tag}: {d.manufacturer} {d.model} [{d.type}], IP: {d.ip_address}\n"
+    inventory_context = "INVENTÁRIO:\n" + "\n".join([f"- {d.asset_tag}: {d.manufacturer} {d.model}" for d in devices])
 
-    # Instruções melhoradas para a IA explicar a ação
     system_prompt = f"""
-Tu és o "Agente Suporte TI". Fala em português de Portugal (pt-PT) de forma simpática e profissional.
-Tens ferramentas de leitura (CPU, RAM, Portas, Serviços, Ping).
+Tu és o "Agente Suporte TI". Fala em português de Portugal (pt-PT).
+O teu fluxo de trabalho é: Coletar -> Diagnosticar -> Sugerir Correção -> Validar.
 
-Se o utilizador relatar um problema que exija uma ação corretiva, NÃO coloques apenas a tag. Deves:
-1. Explicar brevemente o que vais fazer (ex: "Para resolvermos o problema da impressora, precisamos de reiniciar o serviço de impressão que está bloqueado.").
-2. No final da tua resposta, adicionar a tag exata.
+Tens acesso a duas "Skills" de diagnóstico que executam verificações profundas no sistema:
+1. `skill_diagnosticar_impressao`: Verifica spooler, fila, impressoras offline. Retorna um JSON.
+2. `skill_diagnosticar_rede`: Verifica DNS, IP, DHCP. Retorna um JSON.
 
-Tags disponíveis:
-- Problemas de internet/DNS: `[AÇÃO_NECESSÁRIA:DNS]`
-- Impressora "engatada": `[AÇÃO_NECESSÁRIA:SPOOLER]`
-- IP errado: `[AÇÃO_NECESSÁRIA:RENOVAR_IP]`
-- Wi-Fi fraco: `[AÇÃO_NECESSÁRIA:REDE]`
-- Ficheiros corrompidos: `[AÇÃO_NECESSÁRIA:SFC]`
+REGRAS:
+- Se o utilizador disser que algo não imprime, USA OBRIGATORIAMENTE a `skill_diagnosticar_impressao`.
+- Se o utilizador disser que a internet está falha, USA OBRIGATORIAMENTE a `skill_diagnosticar_rede`.
+- Lê o JSON retornado pela skill. Se o `status` for "PROBLEMA_ENCONTRADO", explica ao utilizador e adiciona a tag da ação correspondente:
+  - Para Spooler: `[AÇÃO_NECESSÁRIA:SPOOLER]`
+  - Para DNS: `[AÇÃO_NECESSÁRIA:DNS]`
+  - Para IP: `[AÇÃO_NECESSÁRIA:RENOVAR_IP]`
+  - Para Rede Física: `[AÇÃO_NECESSÁRIA:REDE]`
+- Se não houver ação, explica o que encontraste e diz que o problema pode ser físico ou externo.
 
 {inventory_context}
 """
 
     messages = [{"role": "system", "content": system_prompt}]
-    for msg in payload.history:
-        messages.append({"role": msg["role"], "content": msg["content"]})
+    for msg in payload.history: messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": payload.message})
 
     openai_tools = [
-        {"type": "function", "function": {"name": "obter_info_sistema", "description": "Verifica CPU, RAM e Disco."}},
-        {"type": "function", "function": {"name": "testar_conectividade", "description": "Faz ping a um host.", "parameters": {"type": "object", "properties": {"host": {"type": "string"}}}}},
-        {"type": "function", "function": {"name": "listar_processos_pesados", "description": "Lista processos que mais consomem CPU/RAM."}},
-        {"type": "function", "function": {"name": "verificar_servicos_windows", "description": "Verifica serviços do Windows."}},
-        {"type": "function", "function": {"name": "verificar_portas_abertas", "description": "Lista portas abertas."}}
+        {"type": "function", "function": {"name": "skill_diagnosticar_impressao", "description": "Executa um diagnóstico completo de impressão (spooler, fila, impressoras)."}},
+        {"type": "function", "function": {"name": "skill_diagnosticar_rede", "description": "Executa um diagnóstico completo de rede (DNS, IP)."}},
+        {"type": "function", "function": {"name": "obter_info_sistema", "description": "Verifica CPU e RAM."}},
+        {"type": "function", "function": {"name": "testar_conectividade", "description": "Faz ping a um host.", "parameters": {"type": "object", "properties": {"host": {"type": "string"}}}}}
     ]
 
     try:
         response = client.chat.completions.create(
-            model="openrouter/free",
-            messages=messages,
-            tools=openai_tools,
-            tool_choice="auto",
-            extra_headers={
-                "HTTP-Referer": "https://agente-suporte-ti.vercel.app",
-                "X-OpenRouter-Title": "Agente Suporte TI",
-            }
+            model="openrouter/free", messages=messages, tools=openai_tools, tool_choice="auto",
+            extra_headers={"HTTP-Referer": "https://agente-suporte-ti.vercel.app", "X-OpenRouter-Title": "Agente"}
         )
 
         response_message = response.choices[0].message
         reply_text = response_message.content or ""
 
-        if response_message.tool_calls:
-            tool_call = response_message.tool_calls[0]
-            function_name = tool_call.function.name
-            function_args = tool_call.function.arguments
-            
-            if function_name == "obter_info_sistema": result = tools.obter_info_sistema()
-            elif function_name == "testar_conectividade":
-                args = eval(function_args)
-                result = tools.testar_conectividade(args.get("host", "8.8.8.8"))
-            elif function_name == "listar_processos_pesados": result = tools.listar_processos_pesados()
-            elif function_name == "verificar_servicos_windows": result = tools.verificar_servicos_windows()
-            elif function_name == "verificar_portas_abertas": result = tools.verificar_portas_abertas()
-            else: result = "Ferramenta desconhecida."
+        while response_message.tool_calls:
+            for tool_call in response_message.tool_calls:
+                fn_name = tool_call.function.name
+                fn_args = tool_call.function.arguments
+                
+                result = ""
+                if fn_name == "skill_diagnosticar_impressao": result = printing.diagnosticar_impressao()
+                elif fn_name == "skill_diagnosticar_rede": result = network.diagnosticar_rede()
+                elif fn_name == "obter_info_sistema": result = tools.obter_info_sistema()
+                elif fn_name == "testar_conectividade":
+                    args = json.loads(fn_args)
+                    result = tools.testar_conectividade(args.get("host", "8.8.8.8"))
+                
+                messages.append(response_message)
+                messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
 
-            messages.append(response_message)
-            messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
-
-            final_response = client.chat.completions.create(
-                model="openrouter/free",
-                messages=messages,
-                extra_headers={"HTTP-Referer": "https://agente-suporte-ti.vercel.app", "X-OpenRouter-Title": "Agente Suporte TI"}
+            response = client.chat.completions.create(
+                model="openrouter/free", messages=messages, tools=openai_tools, tool_choice="auto",
+                extra_headers={"HTTP-Referer": "https://agente-suporte-ti.vercel.app", "X-OpenRouter-Title": "Agente"}
             )
-            reply_text = final_response.choices[0].message.content
+            response_message = response.choices[0].message
+            reply_text = response_message.content or ""
 
-        # --- FALLBACK DE SEGURANÇA COM EXPLICAÇÃO ---
-        # Se a IA se esquecer da tag, adicionamos a tag E uma explicação por defeito.
+        # Fallback
         msg_lower = payload.message.lower()
-        
         if "[AÇÃO_NECESSÁRIA:" not in reply_text:
-            if "dns" in msg_lower or "internet" in msg_lower:
-                reply_text += "\n\nPara resolvermos este problema de internet, precisamos de limpar a cache de DNS do seu computador.\n\n**[AÇÃO_NECESSÁRIA:DNS]**"
-            elif "impressora" in msg_lower or "imprimir" in msg_lower:
-                reply_text += "\n\nPara resolvermos o problema da impressora, precisamos de reiniciar o serviço de impressão que pode estar bloqueado.\n\n**[AÇÃO_NECESSÁRIA:SPOOLER]**"
-            elif "ip" in msg_lower or "dhcp" in msg_lower:
-                reply_text += "\n\nPara corrigir o endereço de rede, precisamos de renovar o seu IP.\n\n**[AÇÃO_NECESSÁRIA:RENOVAR_IP]**"
-            elif "wifi" in msg_lower or "wi-fi" in msg_lower or "rede" in msg_lower:
-                reply_text += "\n\nPara restabelecer a ligação, precisamos de reiniciar a placa de rede do seu computador.\n\n**[AÇÃO_NECESSÁRIA:REDE]**"
-            elif "corrompido" in msg_lower or "erro" in msg_lower:
-                reply_text += "\n\nPara verificarmos se existem ficheiros do sistema corrompidos, precisamos de executar a ferramenta SFC do Windows.\n\n**[AÇÃO_NECESSÁRIA:SFC]**"
+            if "impressora" in msg_lower or "imprimir" in msg_lower: reply_text += "\n\n**[AÇÃO_NECESSÁRIA:SPOOLER]**"
+            elif "dns" in msg_lower: reply_text += "\n\n**[AÇÃO_NECESSÁRIA:DNS]**"
 
         return {"id": str(uuid.uuid4()), "role": "assistant", "content": reply_text, "createdAt": datetime.now().isoformat() + "Z"}
-
     except Exception as e:
-        print(f"Erro no OpenRouter: {e}")
-        mock_reply = "⚠️ *O serviço de IA está indisponível. A usar simulação local.*\n\n"
-        msg_lower = payload.message.lower()
-        
-        if "dns" in msg_lower or "internet" in msg_lower: mock_reply += "Para resolver o problema de internet, precisamos de limpar a cache DNS.\n\n**[AÇÃO_NECESSÁRIA:DNS]**"
-        elif "impressora" in msg_lower or "imprimir" in msg_lower: mock_reply += "Para resolver o problema da impressora, precisamos de reiniciar o serviço de impressão.\n\n**[AÇÃO_NECESSÁRIA:SPOOLER]**"
-        elif "ip" in msg_lower: mock_reply += "Para corrigir o IP, precisamos de renovar o endereço.\n\n**[AÇÃO_NECESSÁRIA:RENOVAR_IP]**"
-        elif "wifi" in msg_lower or "rede" in msg_lower: mock_reply += "Para restabelecer a ligação, precisamos de reiniciar a placa de rede.\n\n**[AÇÃO_NECESSÁRIA:REDE]**"
-        elif "corrompido" in msg_lower or "erro" in msg_lower: mock_reply += "Para verificar o sistema, precisamos de executar o SFC.\n\n**[AÇÃO_NECESSÁRIA:SFC]**"
-        else: mock_reply += "Não consigo processar isso agora."
-        
-        return {"id": str(uuid.uuid4()), "role": "assistant", "content": mock_reply, "createdAt": datetime.now().isoformat() + "Z"}
+        print(f"Erro IA: {e}")
+        return {"id": str(uuid.uuid4()), "role": "system", "content": "Erro no cérebro da IA.", "createdAt": datetime.now().isoformat() + "Z"}
 
+# --- ROTAS DE AÇÃO (Executam as Remediações das Skills) ---
 @app.post("/api/actions/flush-dns")
-def action_flush_dns(user_id: str = Depends(get_current_user)): return {"status": "success", "message": tools.limpar_cache_dns()}
-
-@app.post("/api/actions/restart-spooler")
-def action_restart_spooler(user_id: str = Depends(get_current_user)): return {"status": "success", "message": tools.reiniciar_spooler()}
+def action_dns(user_id: str = Depends(get_current_user)): return {"status": "success", "message": network.corrigir_dns()}
 
 @app.post("/api/actions/renew-ip")
-def action_renew_ip(user_id: str = Depends(get_current_user)): return {"status": "success", "message": tools.renovar_ip()}
+def action_ip(user_id: str = Depends(get_current_user)): return {"status": "success", "message": network.corrigir_ip()}
 
 @app.post("/api/actions/restart-network")
-def action_restart_network(user_id: str = Depends(get_current_user)): return {"status": "success", "message": tools.reiniciar_placa_rede()}
+def action_net(user_id: str = Depends(get_current_user)): return {"status": "success", "message": network.reiniciar_rede()}
 
-@app.post("/api/actions/sfc-scan")
-def action_sfc_scan(user_id: str = Depends(get_current_user)): return {"status": "success", "message": tools.executar_sfc_scannow()}
+@app.post("/api/actions/restart-spooler")
+def action_spooler(user_id: str = Depends(get_current_user)): return {"status": "success", "message": printing.corrigir_spooler()}
