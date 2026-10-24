@@ -1,0 +1,25 @@
+# Dependências do Node (Frontend)
+node_modules/
+dist/
+dist-ssr/
+.vite/
+
+# Ficheiros de ambiente (NUNCA comitar)
+.env
+.env.local
+.env.*
+!.env.example
+
+# Python (Backend)
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/
+ENV/
+
+# Sistema operativo / Editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
