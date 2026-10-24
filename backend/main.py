@@ -9,7 +9,6 @@ import asyncio
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 
-# Substituímos o cliente do Google pelo da OpenAI
 from openai import OpenAI
 
 from database import engine, get_db
@@ -24,15 +23,18 @@ models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Agente Suporte TI API", version="1.2.0")
 
+# --- CONFIGURAÇÃO CORS ATUALIZADA ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173", 
+        "https://agente-suporte-ti.vercel.app" # <-- O teu link do Vercel aqui
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Configuração do OpenRouter ---
 openrouter_key = os.getenv("OPENROUTER_API_KEY")
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
@@ -93,7 +95,7 @@ async def get_current_user(authorization: str = Header(None)):
 @app.get("/")
 def read_root(): return {"message": "API a funcionar com OpenRouter!"}
 
-# --- ROTAS CRUD (Tickets e Devices) ---
+# --- ROTAS CRUD ---
 @app.get("/api/tickets")
 def get_tickets(db: Session = Depends(get_db), user_id: str = Depends(get_current_user)):
     try:
@@ -124,7 +126,7 @@ def create_device(device_in: DeviceCreate, db: Session = Depends(get_db), user_i
         db.add(novo); db.commit(); db.refresh(novo); return novo
     except Exception as e: db.rollback(); raise HTTPException(status_code=500, detail=str(e))
 
-# --- ROTA DE CHAT COM OPENROUTER ---
+# --- ROTA DE CHAT ---
 @app.post("/api/chat")
 async def chat(payload: ChatPayload, db: Session = Depends(get_db)):
     devices = db.query(models.Device).all()
@@ -132,7 +134,6 @@ async def chat(payload: ChatPayload, db: Session = Depends(get_db)):
     for d in devices:
         inventory_context += f"- {d.asset_tag}: {d.manufacturer} {d.model} [{d.type}], IP: {d.ip_address}\n"
 
-    # O prompt de sistema precisa de ser claro sobre as ferramentas e ações
     system_prompt = f"""
 Tu és o "Agente Suporte TI". Fala em português de Portugal (pt-PT).
 Tens ferramentas de leitura (CPU, RAM, Portas, Serviços, Ping).
@@ -146,13 +147,11 @@ Se o utilizador relatar:
 {inventory_context}
 """
 
-    # Preparar o histórico no formato de mensagens (OpenAI style)
     messages = [{"role": "system", "content": system_prompt}]
     for msg in payload.history:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": payload.message})
 
-    # Definir as ferramentas no formato da OpenAI
     openai_tools = [
         {"type": "function", "function": {"name": "obter_info_sistema", "description": "Verifica CPU, RAM e Disco."}},
         {"type": "function", "function": {"name": "testar_conectividade", "description": "Faz ping a um host.", "parameters": {"type": "object", "properties": {"host": {"type": "string"}}}}},
@@ -162,17 +161,13 @@ Se o utilizador relatar:
     ]
 
     try:
-        # Usamos um modelo que suporta tool calling. 
-        # "google/gemini-2.0-flash-001" ou "openai/gpt-4o-mini" são boas opções gratuitas/baratas.
-        # Se quiseres um grátis garantido com tools, podes tentar "qwen/qwen3-4b:free" ou "openai/gpt-oss-120b:free"
-        # Por segurança, vamos usar o roteador free, mas se falhar, o fallback entra em ação.
         response = client.chat.completions.create(
-            model="openrouter/free", # Ou "google/gemini-2.0-flash-001" se tiveres créditos
+            model="openrouter/free",
             messages=messages,
             tools=openai_tools,
             tool_choice="auto",
             extra_headers={
-                "HTTP-Referer": "http://localhost:5173",
+                "HTTP-Referer": "https://agente-suporte-ti.vercel.app",
                 "X-OpenRouter-Title": "Agente Suporte TI",
             }
         )
@@ -180,17 +175,15 @@ Se o utilizador relatar:
         response_message = response.choices[0].message
         reply_text = response_message.content or ""
 
-        # Lógica de Tool Calling (se o modelo decidir chamar uma ferramenta)
         if response_message.tool_calls:
             tool_call = response_message.tool_calls[0]
             function_name = tool_call.function.name
             function_args = tool_call.function.arguments
             
-            # Executar a ferramenta localmente
             if function_name == "obter_info_sistema":
                 result = tools.obter_info_sistema()
             elif function_name == "testar_conectividade":
-                args = eval(function_args) # Cuidado com eval em produção, mas ok para local
+                args = eval(function_args)
                 result = tools.testar_conectividade(args.get("host", "8.8.8.8"))
             elif function_name == "listar_processos_pesados":
                 result = tools.listar_processos_pesados()
@@ -201,7 +194,6 @@ Se o utilizador relatar:
             else:
                 result = "Ferramenta desconhecida."
 
-            # Enviar o resultado da ferramenta de volta ao modelo
             messages.append(response_message)
             messages.append({
                 "role": "tool",
@@ -209,18 +201,16 @@ Se o utilizador relatar:
                 "content": result
             })
 
-            # Segunda chamada para obter a resposta final formatada
             final_response = client.chat.completions.create(
                 model="openrouter/free",
                 messages=messages,
                 extra_headers={
-                    "HTTP-Referer": "http://localhost:5173",
+                    "HTTP-Referer": "https://agente-suporte-ti.vercel.app",
                     "X-OpenRouter-Title": "Agente Suporte TI",
                 }
             )
             reply_text = final_response.choices[0].message.content
 
-        # Fallback de segurança para as ações (tal como tínhamos no Gemini)
         msg_lower = payload.message.lower()
         if ("dns" in msg_lower or "internet" in msg_lower) and "[AÇÃO_NECESSÁRIA:" not in reply_text:
             reply_text += "\n\n**[AÇÃO_NECESSÁRIA:DNS]**"
@@ -237,7 +227,6 @@ Se o utilizador relatar:
 
     except Exception as e:
         print(f"Erro no OpenRouter: {e}")
-        # Modo de simulação em caso de falha (igual ao anterior)
         mock_reply = "⚠️ *O serviço de IA está indisponível. A usar simulação local.*\n\n"
         msg_lower = payload.message.lower()
         if "dns" in msg_lower or "internet" in msg_lower: mock_reply += "Posso limpar a cache DNS.\n\n**[AÇÃO_NECESSÁRIA:DNS]**"
@@ -248,23 +237,18 @@ Se o utilizador relatar:
         else: mock_reply += "Não consigo processar isso agora."
         return {"id": str(uuid.uuid4()), "role": "assistant", "content": mock_reply, "createdAt": datetime.now().isoformat() + "Z"}
 
-# --- ROTAS DE AÇÃO (mantêm-se iguais) ---
+# --- ROTAS DE AÇÃO ---
 @app.post("/api/actions/flush-dns")
-def action_flush_dns(user_id: str = Depends(get_current_user)):
-    return {"status": "success", "message": tools.limpar_cache_dns()}
+def action_flush_dns(user_id: str = Depends(get_current_user)): return {"status": "success", "message": tools.limpar_cache_dns()}
 
 @app.post("/api/actions/restart-spooler")
-def action_restart_spooler(user_id: str = Depends(get_current_user)):
-    return {"status": "success", "message": tools.reiniciar_spooler()}
+def action_restart_spooler(user_id: str = Depends(get_current_user)): return {"status": "success", "message": tools.reiniciar_spooler()}
 
 @app.post("/api/actions/renew-ip")
-def action_renew_ip(user_id: str = Depends(get_current_user)):
-    return {"status": "success", "message": tools.renovar_ip()}
+def action_renew_ip(user_id: str = Depends(get_current_user)): return {"status": "success", "message": tools.renovar_ip()}
 
 @app.post("/api/actions/restart-network")
-def action_restart_network(user_id: str = Depends(get_current_user)):
-    return {"status": "success", "message": tools.reiniciar_placa_rede()}
+def action_restart_network(user_id: str = Depends(get_current_user)): return {"status": "success", "message": tools.reiniciar_placa_rede()}
 
 @app.post("/api/actions/sfc-scan")
-def action_sfc_scan(user_id: str = Depends(get_current_user)):
-    return {"status": "success", "message": tools.executar_sfc_scannow()}
+def action_sfc_scan(user_id: str = Depends(get_current_user)): return {"status": "success", "message": tools.executar_sfc_scannow()}
