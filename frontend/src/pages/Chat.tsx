@@ -31,17 +31,37 @@ export default function Chat() {
     }
   }
 
-  // ... handleCreateTicket (igual, mantém-se) ...
+  // RESTAURADA: Função para criar ticket
+  async function handleCreateTicket() {
+    const firstUserMsg = messages.find((m) => m.role === "user");
+    const lastAiMsg = [...messages].reverse().find((m) => m.role === "assistant");
+    if (!firstUserMsg || !lastAiMsg) return;
+    
+    setCreatingTicket(true);
+    try {
+      const fullText = (firstUserMsg.content + " " + lastAiMsg.content).toLowerCase();
+      let category = "outro";
+      if (fullText.includes("windows") || fullText.includes("pc")) category = "windows";
+      else if (fullText.includes("rede") || fullText.includes("internet")) category = "redes";
+      else if (fullText.includes("impressora") || fullText.includes("hp")) category = "impressoras_hp";
+      
+      await api.createTicket({ title: firstUserMsg.content.substring(0, 80), description: lastAiMsg.content, category, priority: "media" });
+      alert("Ticket criado!");
+    } catch (err) { 
+      alert("Erro ao criar ticket."); 
+    } finally { 
+      setCreatingTicket(false); 
+    }
+  }
 
-  // NOVO: Executa a ação via AGENTE LOCAL (localhost)
-  async function handleAction(actionType: string, successMsg: string) {
+  // Função para executar a ação no Agente Local
+  async function handleAction(actionType: string) {
     setLoading(true);
     
-    // Mapear os tipos de ação da UI para os comandos do Agente Local
     let agentAction = "";
     if (actionType === "SPOOLER") agentAction = "corrigir_spooler";
     else if (actionType === "DNS") agentAction = "limpar_dns";
-    // ... adicionar as outras ações aqui
+    // Podes adicionar as outras ações aqui no futuro
     
     try {
       const agentResponse = await api.callLocalAgent(agentAction);
@@ -58,22 +78,22 @@ export default function Chat() {
     }
   }
 
-  const actionMap: Record<string, { label: string, endpoint: string }> = {
-    "DNS": { label: "Limpar Cache DNS", endpoint: "DNS" },
-    "SPOOLER": { label: "Reiniciar Serviço de Impressão", endpoint: "SPOOLER" },
-    "RENOVAR_IP": { label: "Renovar Endereço IP", endpoint: "RENOVAR_IP" },
-    "REDE": { label: "Reiniciar Placa de Rede", endpoint: "REDE" },
-    "SFC": { label: "Verificar Ficheiros do Sistema", endpoint: "SFC" },
+  const actionMap: Record<string, { label: string }> = {
+    "DNS": { label: "Limpar Cache DNS" },
+    "SPOOLER": { label: "Reiniciar Serviço de Impressão" },
+    "RENOVAR_IP": { label: "Renovar Endereço IP" },
+    "REDE": { label: "Reiniciar Placa de Rede" },
+    "SFC": { label: "Verificar Ficheiros do Sistema" },
   };
 
-  // ... (O resto do JSX mantém-se IGUAL ao anterior, mas o onClick do botão passa a chamar handleAction(actionMap[actionKey].endpoint, actionKey)) ...
-  
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem", height: "100%" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
         <div><h1>Chat de suporte</h1></div>
         {messages.some((m) => m.role === "assistant") && (
-          <Button variant="primary" onClick={handleCreateTicket} disabled={creatingTicket}>Criar Ticket</Button>
+          <Button variant="primary" onClick={handleCreateTicket} disabled={creatingTicket}>
+            {creatingTicket ? "A criar..." : "Criar Ticket"}
+          </Button>
         )}
       </div>
 
@@ -94,7 +114,7 @@ export default function Chat() {
                     <p style={{ margin: "0 0 0.75rem", fontSize: "14px", fontWeight: "bold" }}>Ação recomendada (Requer Agente Local):</p>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
                       {actionsFound.map(actionKey => (
-                        <Button key={actionKey} variant="primary" onClick={() => handleAction(actionKey, actionKey)} disabled={loading}>
+                        <Button key={actionKey} variant="primary" onClick={() => handleAction(actionKey)} disabled={loading}>
                           {actionMap[actionKey].label}
                         </Button>
                       ))}
