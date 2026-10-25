@@ -12,12 +12,11 @@ from database import engine, get_db
 import models
 import jwt
 from jwt import PyJWKClient
-import tools
 
 load_dotenv()
 models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Agente Suporte TI API", version="3.0.0 - WebSockets")
+app = FastAPI(title="Agente Suporte TI API", version="3.1.0")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -44,18 +43,15 @@ class AgentManager:
     async def send_command(self, acao: str) -> dict:
         if not self.active_agent:
             return {"status": "error", "message": "Agente Local offline."}
-        
         req_id = str(uuid.uuid4())
         future = asyncio.get_event_loop().create_future()
         self.pending_requests[req_id] = future
-
         try:
             await self.active_agent.send_text(json.dumps({"id": req_id, "acao": acao}))
-            # Espera a resposta com um timeout de 15 segundos
             resultado = await asyncio.wait_for(future, timeout=15.0)
             return resultado
         except asyncio.TimeoutError:
-            return {"status": "error", "message": "O PC demorou demasiado tempo a responder."}
+            return {"status": "error", "message": "O PC demorou demasiado tempo."}
         except Exception as e:
             return {"status": "error", "message": str(e)}
         finally:
@@ -66,20 +62,15 @@ manager = AgentManager()
 @app.websocket("/ws/agente")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
-    print("✅ Agente Local ligado via WebSocket!")
     try:
         while True:
             data = await websocket.receive_text()
             payload = json.loads(data)
             req_id = payload.get("id")
-            resultado = payload.get("resultado")
-            
-            # Se o agente respondeu a um pedido nosso, resolve a promessa
             if req_id in manager.pending_requests:
-                manager.pending_requests[req_id].set_result(resultado)
+                manager.pending_requests[req_id].set_result(payload.get("resultado"))
     except WebSocketDisconnect:
         manager.disconnect()
-        print("❌ Agente Local desligou.")
 
 # --- MODELOS PYDANTIC ---
 class ChatPayload(BaseModel):
@@ -148,20 +139,25 @@ def create_device(device_in: DeviceCreate, db: Session = Depends(get_db), user_i
     novo = models.Device(**device_in.model_dump())
     db.add(novo); db.commit(); db.refresh(novo); return novo
 
-# --- CHAT COM WEBSOCKET ---
+# --- CHAT INTELIGENTE ---
 @app.post("/api/chat")
 async def chat(payload: ChatPayload, db: Session = Depends(get_db)):
     devices = db.query(models.Device).all()
-    inventory_context = "INVENTÁRIO:\n" + "\n".join([f"- {d.asset_tag}: {d.manufacturer} {d.model}" for d in devices])
+    inventory_context = "INVENTÁRIO:\n" + "\n".join([f"- {d.asset_tag}: {d.manufacturer} {d.model} [{d.type}]" for d in devices])
 
     agent_status = "ONLINE" if manager.active_agent else "OFFLINE"
     
+    # INSTRUÇÃO CRÍTICA PARA NÃO FAZER PERGUNTAS DESNECESSÁRIAS
     system_prompt = f"""
-Tu és o "Agente Suporte TI". Fala em português de Portugal (pt-PT).
-O estado do Agente Local no PC do utilizador é: {agent_status}.
+Tu és o "Agente Suporte TI", um técnico sénior especialista em Windows. Fala em pt-PT.
+Estado do Agente Local: {agent_status}
 
-Tens ferramentas que comunicam com o PC. USA-AS para diagnósticos reais.
-Se usares a ferramenta e o resultado for `fila_presa > 0` ou `spooler == "STOPPED"`, adiciona a tag `[AÇÃO_NECESSÁRIA:SPOOLER]`.
+DIRETRIZES DE DIAGNÓSTICO:
+1. NUNCA faças ao utilizador perguntas cuja resposta possas obter através de uma ferramenta (ex: "qual é o estado do spooler?", "a impressora está instalada?").
+2. Se o utilizador disser "a impressora não imprime", USA IMEDIATAMENTE a ferramenta `skill_diagnosticar_impressao`. Ela devolverá o estado do spooler, a fila e a LISTA de impressoras com os seus nomes e portas.
+3. LÊ os dados que a ferramenta devolve (especialmente `impressoras_raw`). Se a impressora mencionada estiver "Offline" ou "Error" na lista, diz isso ao utilizador e sugere a correção.
+4. Só deves fazer perguntas ao utilizador sobre coisas que o software não consegue ver (ex: "A impressora tem papel?", "O cabo USB está ligado?", "A luz verde está a piscar?").
+5. Se os dados mostrarem que o Spooler está parado ou a fila presa, explica e adiciona a tag `[AÇÃO_NECESSÁRIA:SPOOLER]`.
 
 {inventory_context}
 """
@@ -170,10 +166,9 @@ Se usares a ferramenta e o resultado for `fila_presa > 0` ou `spooler == "STOPPE
     for msg in payload.history: messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": payload.message})
 
-    # Definir as ferramentas locais para a IA
     openai_tools = [
-        {"type": "function", "function": {"name": "skill_diagnosticar_impressao", "description": "Diagnóstico real de impressão."}},
-        {"type": "function", "function": {"name": "skill_diagnosticar_rede", "description": "Diagnóstico real de rede."}}
+        {"type": "function", "function": {"name": "skill_diagnosticar_impressao", "description": "Vai buscar o estado real do spooler, fila e lista de impressoras no PC."}},
+        {"type": "function", "function": {"name": "skill_diagnosticar_rede", "description": "Verifica a rede."}}
     ]
 
     try:
@@ -189,7 +184,6 @@ Se usares a ferramenta e o resultado for `fila_presa > 0` ou `spooler == "STOPPE
             for tool_call in response_message.tool_calls:
                 fn_name = tool_call.function.name
                 
-                # A MÁGICA: Chama o agente local via WebSocket e ESPERA a resposta
                 if fn_name == "skill_diagnosticar_impressao":
                     res = await manager.send_command("diagnosticar_impressao")
                     result = json.dumps(res)
@@ -202,6 +196,7 @@ Se usares a ferramenta e o resultado for `fila_presa > 0` ou `spooler == "STOPPE
                 messages.append(response_message)
                 messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
 
+            # A IA lê o JSON bruto das impressoras e formula a resposta final
             response = client.chat.completions.create(
                 model="openrouter/free", messages=messages, tools=openai_tools, tool_choice="auto",
                 extra_headers={"HTTP-Referer": "https://agente-suporte-ti.vercel.app", "X-OpenRouter-Title": "Agente"}
@@ -214,7 +209,7 @@ Se usares a ferramenta e o resultado for `fila_presa > 0` ou `spooler == "STOPPE
         print(f"Erro IA: {e}")
         return {"id": str(uuid.uuid4()), "role": "system", "content": "Erro no cérebro da IA.", "createdAt": datetime.now().isoformat() + "Z"}
 
-# --- ROTAS DE AÇÃO (Executam via WebSocket no PC do Utilizador) ---
+# --- ROTAS DE AÇÃO ---
 @app.post("/api/actions/restart-spooler")
 async def action_spooler(user_id: str = Depends(get_current_user)): 
     res = await manager.send_command("corrigir_spooler")
