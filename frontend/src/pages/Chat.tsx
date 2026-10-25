@@ -4,6 +4,7 @@ import Button from "@/components/ui/Button";
 import { api } from "@/services/api";
 import { generateId } from "@/utils/format";
 import type { ChatMessage } from "@/types/chat";
+import { supabase } from "@/services/supabase";
 
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -31,7 +32,6 @@ export default function Chat() {
     }
   }
 
-  // RESTAURADA: Função para criar ticket
   async function handleCreateTicket() {
     const firstUserMsg = messages.find((m) => m.role === "user");
     const lastAiMsg = [...messages].reverse().find((m) => m.role === "assistant");
@@ -54,25 +54,26 @@ export default function Chat() {
     }
   }
 
-  // Função para executar a ação no Agente Local
   async function handleAction(actionType: string) {
     setLoading(true);
     
-    let agentAction = "";
-    if (actionType === "SPOOLER") agentAction = "corrigir_spooler";
-    else if (actionType === "DNS") agentAction = "limpar_dns";
-    // Podes adicionar as outras ações aqui no futuro
+    let endpoint = "";
+    if (actionType === "SPOOLER") endpoint = "/api/actions/restart-spooler";
+    else if (actionType === "DNS") endpoint = "/api/actions/flush-dns";
     
     try {
-      const agentResponse = await api.callLocalAgent(agentAction);
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch(`${import.meta.env.VITE_API_URL}${endpoint}`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${session?.access_token}` }
+      });
       
-      if (agentResponse.status === "success") {
-        setMessages((prev) => [...prev, { id: generateId(), role: "system", content: `✅ ${agentResponse.message}`, createdAt: new Date().toISOString() }]);
-      } else {
-        setMessages((prev) => [...prev, { id: generateId(), role: "system", content: `❌ Erro: ${agentResponse.message}`, createdAt: new Date().toISOString() }]);
-      }
+      if (!res.ok) throw new Error("Falha na API");
+      
+      const data = await res.json();
+      setMessages((prev) => [...prev, { id: generateId(), role: "system", content: `✅ ${data.message}`, createdAt: new Date().toISOString() }]);
     } catch (err) {
-      setMessages((prev) => [...prev, { id: generateId(), role: "system", content: "❌ Não foi possível contactar o Agente Local. Ele está a correr no teu PC?", createdAt: new Date().toISOString() }]);
+      setMessages((prev) => [...prev, { id: generateId(), role: "system", content: `❌ Erro ao executar a ação no PC.`, createdAt: new Date().toISOString() }]);
     } finally {
       setLoading(false);
     }
@@ -111,7 +112,7 @@ export default function Chat() {
                 <div>{displayContent}</div>
                 {actionsFound.length > 0 && (
                   <div style={{ marginTop: "1.5rem", padding: "1rem", background: "rgba(56, 189, 248, 0.1)", borderRadius: "8px", border: "1px solid var(--accent)" }}>
-                    <p style={{ margin: "0 0 0.75rem", fontSize: "14px", fontWeight: "bold" }}>Ação recomendada (Requer Agente Local):</p>
+                    <p style={{ margin: "0 0 0.75rem", fontSize: "14px", fontWeight: "bold" }}>Ação recomendada pelo agente:</p>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
                       {actionsFound.map(actionKey => (
                         <Button key={actionKey} variant="primary" onClick={() => handleAction(actionKey)} disabled={loading}>
