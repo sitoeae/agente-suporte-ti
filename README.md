@@ -63,7 +63,7 @@ python agente_local.py
 Consulta os ficheiros .env.example nas pastas frontend e backend para saber que chaves são necessárias (Supabase, OpenRouter, etc). Nunca comites os teus ficheiros .env reais.
 
 👨‍💻 Autor
-Desenvolvido por [O Teu Nome].
+Desenvolvido por [Ezequiel Araujo Sitoe].
 
 LinkedIn
 
